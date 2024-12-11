@@ -1,0 +1,30 @@
+name: "Build and publish container images"
+
+on:
+  workflow_dispatch:
+    inputs:
+      image-tag:
+        description: "Tag dla budowanego obrazu"
+        required: true
+      container-registry:
+        description: "Container Registry."
+        type: choice
+        required: true
+        options:
+          - NONPROD
+          - PROD
+      push-containers:
+        description: "Push images to registry. Default: false"
+        type: boolean
+        required: false
+        default: false
+
+env:
+  GIT_COMMIT: ${{ github.sha }}
+  IMAGE_TAG: ${{ inputs.image-tag }}
+
+jobs:
+  example-job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo $GIT_COMMIT $IMAGE_TAG
