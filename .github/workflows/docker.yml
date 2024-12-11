@@ -22,6 +22,8 @@ on:
 env:
   GIT_COMMIT: ${{ github.sha }}
   IMAGE_TAG: ${{ inputs.image-tag }}
+  PUSH_CONTAINER: ${{ inputs.push-containers }}
+  REGISTRY: ${{ inputs.container-registry }}
 
 jobs:
   example-job:
