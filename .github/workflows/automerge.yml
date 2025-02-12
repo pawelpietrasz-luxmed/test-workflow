@@ -10,13 +10,13 @@ concurrency:
 
 jobs:
   automerge-main-to-release:
-    uses: LUXMED/workflows/.github/workflows/automerge.yml@main
+    uses: pawelpietrasz-luxmed/test-workflow/automerge.yml@main
     with:
       checkout-directory: temp-repo
     secrets: inherit
 
   automerge-main-to-develop:
-    uses: LUXMED/workflows/.github/workflows/automerge.yml@main
+    uses: pawelpietrasz-luxmed/test-workflow/automerge.yml@main
     with:
       base-branches: develop/**
       checkout-directory: temp-repo2 # nie wiem czy trzeba, na wszelki wypadek ustawiam inny niż powyżej
