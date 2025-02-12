@@ -1,0 +1,23 @@
+name: Automerge main
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: AUTOMERGE
+  cancel-in-progress: false # zapobiegamy wykonaniu tego samego workflow w tym samym czasie, ale kolejkujemy kolejne wykonania
+
+jobs:
+  automerge-main-to-release:
+    uses: pawelpietrasz-luxmed/test-workflow/.github/workflows/automerge.yml@main
+    with:
+      checkout-directory: temp-repo
+    secrets: inherit
+
+  automerge-main-to-develop:
+    uses: pawelpietrasz-luxmed/test-workflow/.github/workflows/automerge.yml@main
+    with:
+      base-branches: develop/**
+      checkout-directory: temp-repo2 # nie wiem czy trzeba, na wszelki wypadek ustawiam inny niż powyżej
+    secrets: inherit

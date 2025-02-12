@@ -1,23 +1,180 @@
 name: Automerge
-on:
-  push:
-    branches:
-      - main
 
-concurrency:
-  group: AUTOMERGE
-  cancel-in-progress: false # zapobiegamy wykonaniu tego samego workflow w tym samym czasie, ale kolejkujemy kolejne wykonania
+on:
+  workflow_call:
+    inputs:
+      checkout-directory:
+        type: string
+        description: Path to directory to checkout to. Default 'automerge-repo'.
+        required: false
+        default: automerge-repo
+      head-branch:
+        type: string
+        description: Head branch to merge from. Default 'main'.
+        required: false
+        default: main
+      base-branches:
+        type: string
+        description: Base branches to merge to. Name or pattern. Default 'release/*'.
+        required: false
+        default: release/*
+    secrets:
+      AUTOMERGE_APP_ID:
+        description: Available as org secret. Use secrets:inherit.
+        required: true
+      AUTOMERGE_APP_PRIVATE_KEY:
+        description: Available as org secret. Use secrets:inherit.
+        required: true
+
+env:
+  APP_LOGIN: lux-med-automerger[bot]
 
 jobs:
-  automerge-main-to-release:
-    uses: pawelpietrasz-luxmed/test-workflow/automerge.yml@main
-    with:
-      checkout-directory: temp-repo
-    secrets: inherit
+  ensure-labels-exist:
+    name: Ensure PR labels exist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate a token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - run: |
+          gh label create -R ${{ github.repository }} automerge -c 757575 -d "PR created by automerge" --force
+          gh label create -R ${{ github.repository }} 'automerge conflict' -c 990000 -d "Conflicts in automerge PR" --force
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+  prepare-branches-array:
+    name: Prepare branches array
+    runs-on: ubuntu-latest
+    outputs:
+      open-base-branches: ${{ steps.get-open-base-branches.outputs.open-base-branches }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: ${{inputs.checkout-directory}}
+          fetch-depth: 0
 
-  automerge-main-to-develop:
-    uses: pawelpietrasz-luxmed/test-workflow/automerge.yml@main
-    with:
-      base-branches: develop/**
-      checkout-directory: temp-repo2 # nie wiem czy trzeba, na wszelki wypadek ustawiam inny niż powyżej
-    secrets: inherit
+      - name: Get open ${{ inputs.base-branches }} branches
+        id: get-open-base-branches
+        working-directory: ${{inputs.checkout-directory}}
+        run: |
+          echo '### Checking for open `${{ inputs.base-branches }}` branches not containing `${{ inputs.head-branch }}`' >> $GITHUB_STEP_SUMMARY
+          branches=$(git branch \
+                         --list origin/${{ inputs.base-branches }} \
+                         --remote \
+                         --no-merged origin/${{ inputs.head-branch }} \
+                         --no-contains origin/${{ inputs.head-branch }} \
+                         --format="%(refname:strip=3)" \
+                         | jq \
+                         --raw-input \
+                         --null-input \
+                         --compact-output \
+                         [inputs])
+          echo $branches
+          if [ $branches == '[]' ]; then
+            echo 'No `${{ inputs.base-branches }}` branches to merge to'. >> $GITHUB_STEP_SUMMARY
+          else
+            echo open-base-branches=$branches >> $GITHUB_OUTPUT
+            echo 'Found following branches to merge `${{ inputs.head-branch }}` to: `'$branches'`.' >> $GITHUB_STEP_SUMMARY
+          fi
+
+  create-pr:
+    name: Create PR
+    runs-on: ubuntu-latest
+    needs: [prepare-branches-array, ensure-labels-exist]
+    if: needs.prepare-branches-array.outputs.open-base-branches != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.prepare-branches-array.outputs.open-base-branches) }}
+    steps:
+      - name: Generate a token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - name: Create PR to ${{ matrix.branch }}
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          echo '### ${{ matrix.branch }}' >> $GITHUB_STEP_SUMMARY
+          pr_url=$(gh pr list \
+                         --repo ${{ github.repository }} \
+                         --base ${{ matrix.branch }} \
+                         --head ${{ inputs.head-branch }} \
+                         --json url \
+                         --jq '.[0].url')
+          if [ -z "$pr_url" ]; then
+            pr_url=$(gh pr create --repo ${{ github.repository }} \
+                           --base ${{ matrix.branch }} \
+                           --head ${{ inputs.head-branch }} \
+                           --title 'Automerge ${{ inputs.head-branch }} into ${{ matrix.branch }}' \
+                           --body '<!-- NON-3 -->' \
+                           --label automerge)
+            echo Created PR: $pr_url >> $GITHUB_STEP_SUMMARY
+          else
+            echo PR already exists: $pr_url >> $GITHUB_STEP_SUMMARY
+          fi
+          echo PR_URL=$pr_url >> $GITHUB_ENV
+          echo PR_NUMBER=$(gh pr view $pr_url --json number --jq .number) >> $GITHUB_ENV
+      - name: Merge PR to ${{ matrix.branch }}
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          pr_mergeable=$(gh pr view ${{ env.PR_URL }} --json mergeable --jq '.mergeable')
+          if [ "$pr_mergeable" = "UNKNOWN" ]; then
+            sleep 1s
+            pr_mergeable=$(gh pr view ${{ env.PR_URL }} --json mergeable --jq '.mergeable')
+          fi
+          if [ "$pr_mergeable" = "MERGEABLE" ]; then
+            gh pr merge ${{ env.PR_URL }} \
+                  --merge \
+                  --admin \
+                  --subject "[AUTOMERGE] Merging ${{ inputs.head-branch }} into ${{ matrix.branch }}"
+            echo Auto merged ${{ env.PR_URL }}>> $GITHUB_STEP_SUMMARY
+          else
+            gh pr edit ${{ env.PR_URL }} --add-label "automerge conflict"
+            echo Created PR ${{ env.PR_URL }} but it is not mergeable due to conflicts. >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Cancel PR workflows
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          sleep 2s
+          head_branch_sha=$(gh api -X get repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }} -q .head.sha)
+          echo Head branch SHA: $head_branch_sha
+          workflow_run_ids=$(gh api \
+                                        -H "Accept: application/vnd.github+json" \
+                                        -H "X-Github-Api-Version: 2022-11-28" \
+                                        -X get \
+                                        repos/${{ github.repository }}/actions/runs \
+                                        -f event=pull_request \
+                                        -f branch=${{ inputs.head-branch }} \
+                                        -f actor=${{ env.APP_LOGIN }} \
+                                        -f head_sha=$head_branch_sha \
+                                        -q .workflow_runs.[].id)
+          echo Workflow runs ids: $workflow_run_ids
+          declare -a run_ids_arr=($workflow_run_ids);
+          for run_id in "${run_ids_arr[@]}";
+          do
+            echo '### Cancelling run https://github.com/${{ github.repository }}/actions/runs/'$run_id >> $GITHUB_STEP_SUMMARY
+            status=$(gh api \
+                        -H "Accept: application/vnd.github+json" \
+                        -H "X-Github-Api-Version: 2022-11-28" \
+                        -X post \
+                        repos/${{ github.repository }}/actions/runs/$run_id/cancel \
+                        -q .status);
+
+            echo Cancelling run $run_id status: $status
+            if [ $status == '409' ]; then
+              echo Failed to cancel run — it is already completed >> $GITHUB_STEP_SUMMARY
+            else
+              echo Run cancelled >> $GITHUB_STEP_SUMMARY
+            fi
+          done;
